@@ -276,7 +276,7 @@ const dragon = makeDragon(); scene.add(dragon.group);
 const GEO = {
   oct: new THREE.OctahedronGeometry(1, 0), blade: new THREE.BoxGeometry(2.4, .1, .7), eye: new THREE.SphereGeometry(.3, 6, 5),
   orbIn: new THREE.SphereGeometry(.38, 8, 6), orbOut: new THREE.SphereGeometry(.78, 8, 6),
-  shot: new THREE.BoxGeometry(.16, .16, 2.4), laserHead: new THREE.SphereGeometry(.38, 6, 5), flash: new THREE.SphereGeometry(1, 10, 8)
+  shot: new THREE.BoxGeometry(.45, .45, 3.4), shotGlow: new THREE.SphereGeometry(.9, 8, 6), laserHead: new THREE.SphereGeometry(.38, 6, 5), flash: new THREE.SphereGeometry(1, 10, 8)
 };
 const add = THREE.AdditiveBlending;
 const MAT = {
@@ -290,6 +290,7 @@ const MAT = {
   orbIn: new THREE.MeshBasicMaterial({ color: 0xffe0f2 }),
   orbOut: new THREE.MeshBasicMaterial({ color: 0xff3fa0, transparent: true, opacity: .55, blending: add, depthWrite: false }),
   shot: new THREE.MeshBasicMaterial({ color: 0xffe27a, transparent: true, blending: add, depthWrite: false }),
+  shotGlow: new THREE.MeshBasicMaterial({ color: 0xffb040, transparent: true, opacity: .45, blending: add, depthWrite: false }),
   laserHead: new THREE.MeshBasicMaterial({ color: 0xc8fbff, transparent: true, blending: add, depthWrite: false }),
   laserLine: new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, blending: add, depthWrite: false })
 };
@@ -575,7 +576,7 @@ function fireShot() {
   const origin = gunPos(new V3());
   raycaster.setFromCamera({ x: ret.x, y: ret.y }, camera);
   let target = raycaster.ray.at(120, new V3());
-  const [rx, ry] = retPx(); let best = null, bd = 34;
+  const [rx, ry] = retPx(); let best = null, bd = 72;
   for (const e of enemies) {
     if (e.dead || !e.mesh.visible) continue;
     toScreen(e.wp, scr); if (!scr.on) continue;
@@ -584,9 +585,24 @@ function fireShot() {
   for (const o of orbs) { toScreen(o.mesh.position, scr); if (!scr.on) continue; const d = Math.hypot(scr.x - rx, scr.y - ry); if (d < bd * .7) { bd = d; best = o.mesh.position; } }
   if (best) target.copy(best);
   const dir = target.sub(origin).normalize();
-  const m = new THREE.Mesh(GEO.shot, MAT.shot); m.position.copy(origin); m.lookAt(_a.copy(origin).add(dir)); scene.add(m);
+  const m = new THREE.Mesh(GEO.shot, MAT.shot); m.add(new THREE.Mesh(GEO.shotGlow, MAT.shotGlow)); m.position.copy(origin); m.lookAt(_a.copy(origin).add(dir)); scene.add(m);
   shots.push({ mesh: m, prev: origin.clone(), vel: dir.multiplyScalar(160), life: 1.0 });
   sfx.shot();
+}
+// normal shot: fat hitbox, 2 damage, and a blast that also hits anything nearby
+const SHOT_PAD = 1.6, SHOT_DMG = 2, SPLASH_R = 6;
+function shotImpact(target) {
+  const at = target.wp.clone();
+  flash(at, 2.2, .25, 0xffc060); emit(at, 10, 9, .35, C_FIRE1, C_FIRE2);
+  damageEnemy(target, SHOT_DMG, 1);
+  for (const e of enemies) {
+    if (e === target || e.dead || !e.mesh.visible) continue;
+    if (e.wp.distanceTo(at) < SPLASH_R + e.radius) damageEnemy(e, 1, 1);
+  }
+  for (const o of orbs) {
+    if (o.dead || o.mesh.position.distanceTo(at) > SPLASH_R) continue;
+    o.dead = true; scene.remove(o.mesh); emit(o.mesh.position, 6, 7, .3, C_PINK, C_FIRE1); G.score += 10;
+  }
 }
 function segHit(a, b, c, r) {
   _a.subVectors(b, a); _t.subVectors(c, a);
@@ -630,17 +646,28 @@ function releaseLocks() {
   locks = [];
 }
 function spawnLaser(e, delay, volley) {
-  const N = 18, pos = new Float32Array(N * 3), col = new Float32Array(N * 3);
+  const N = 40, pos = new Float32Array(N * 3), col = new Float32Array(N * 3);
   for (let i = 0; i < N; i++) { const f = 1 - i / N; col[i * 3] = .45 * f; col[i * 3 + 1] = .95 * f; col[i * 3 + 2] = 1 * f; }
   const geo = new THREE.BufferGeometry(); geo.setAttribute('position', new THREE.BufferAttribute(pos, 3)); geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
-  const line = new THREE.Line(geo, MAT.laserLine); line.frustumCulled = false; line.visible = false; scene.add(line);
+  const line = new THREE.Line(geo, MAT.laserLine.clone()); line.frustumCulled = false; line.visible = false; scene.add(line);
   const head = new THREE.Mesh(GEO.laserHead, MAT.laserHead); head.visible = false; scene.add(head);
   lasers.push({ e, delay, volley, line, head, N, started: false, t: 0, pos: new V3(), prev: new V3(), vel: new V3(), dead: false, fade: 0 });
 }
-function removeLaser(L) { L.dead = true; scene.remove(L.line); scene.remove(L.head); L.line.geometry.dispose(); }
+function removeLaser(L) { L.dead = true; scene.remove(L.line); scene.remove(L.head); L.line.geometry.dispose(); L.line.material.dispose(); }
+// after a hit (or losing its target) the trail stays in the sky and fades out as an afterimage
+const GHOST_T = 1.1;
+function ghostLaser(L) { L.ghost = 0; L.head.visible = false; }
 function updateLasers(dt) {
   for (const L of lasers) {
     if (L.dead) continue;
+    if (L.ghost != null) {
+      L.ghost += dt; L.line.material.opacity = Math.max(0, 1 - L.ghost / GHOST_T);
+      const arr = L.line.geometry.attributes.position.array, dz = G.speed * .5 * dt;
+      for (let i = 2; i < arr.length; i += 3) arr[i] += dz;
+      L.line.geometry.attributes.position.needsUpdate = true;
+      if (L.ghost > GHOST_T) removeLaser(L);
+      continue;
+    }
     if (L.delay > 0) { L.delay -= dt; continue; }
     if (!L.started) {
       L.started = true; gunPos(L.pos);
@@ -666,10 +693,11 @@ function updateLasers(dt) {
     const arr = L.line.geometry.attributes.position.array;
     arr.copyWithin(3, 0, (L.N - 1) * 3); arr[0] = L.pos.x; arr[1] = L.pos.y; arr[2] = L.pos.z;
     L.line.geometry.attributes.position.needsUpdate = true; L.head.position.copy(L.pos);
+    if (L.pos.distanceToSquared(camera.position) > 196) emit(L.pos, 2, .6, .7, C_CYAN, C_CYAN);
     if (L.e && (segHit(L.prev, L.pos, L.e.wp, L.e.radius + .6) || L.t > 2.4)) {
-      emit(L.e.wp, 10, 10, .4, C_CYAN, C_FIRE1); damageEnemy(L.e, 3, L.volley); removeLaser(L); continue;
+      emit(L.e.wp, 10, 10, .4, C_CYAN, C_FIRE1); damageEnemy(L.e, 3, L.volley); ghostLaser(L); continue;
     }
-    if (L.fade > .5 || L.t > 3) removeLaser(L);
+    if (L.fade > .5 || L.t > 3) ghostLaser(L);
   }
 }
 
@@ -768,11 +796,11 @@ function update(dt) {
       s.prev.copy(s.mesh.position); s.mesh.position.addScaledVector(s.vel, dt); s.life -= dt;
       for (const e of enemies) {
         if (e.dead || !e.mesh.visible) continue;
-        if (segHit(s.prev, s.mesh.position, e.wp, e.radius)) { damageEnemy(e, 1, 1); s.dead = true; break; }
+        if (segHit(s.prev, s.mesh.position, e.wp, e.radius + SHOT_PAD)) { shotImpact(e); s.dead = true; break; }
       }
       if (!s.dead) for (const o of orbs) {
         if (o.dead) continue;
-        if (segHit(s.prev, s.mesh.position, o.mesh.position, o.radius)) { o.dead = true; scene.remove(o.mesh); emit(o.mesh.position, 8, 8, .35, C_PINK, C_FIRE1); G.score += 10; s.dead = true; break; }
+        if (segHit(s.prev, s.mesh.position, o.mesh.position, o.radius + SHOT_PAD)) { o.dead = true; scene.remove(o.mesh); emit(o.mesh.position, 8, 8, .35, C_PINK, C_FIRE1); G.score += 10; s.dead = true; break; }
       }
       if (s.life <= 0) s.dead = true;
       if (s.dead) scene.remove(s.mesh);
